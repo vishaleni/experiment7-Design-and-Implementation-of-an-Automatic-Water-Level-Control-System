@@ -116,8 +116,32 @@ The water-level information is displayed on the **Wokwi Serial Monitor** using U
 
 
 ## Circuit Connections
-
+<img width="505" height="277" alt="image" src="https://github.com/user-attachments/assets/190f436e-eeab-4f1c-b26b-b7f221a14441" />
 ### Potentiometer
+              Potentiometer
+         (Water Level Sensor)
+        +--------------------+
+3.3V ---| VCC                |
+GND  ---| GND                |
+        | SIG                 |
+        +--+-----------------+
+           |
+           |
+          PA0
+           |
+           v
++---------------------------+
+| STM32 Nucleo-L031K6       |
+|                           |
+| PA0  -> ADC Input         |
+|                           |
+| PA2  -> USART2 TX         |
+| PA15 -> USART2 RX         |
++-------------+-------------+
+              |
+              | UART
+              v
+       Wokwi Serial Monitor
 
 | Potentiometer Pin | STM32 Connection |
 |---|---|
