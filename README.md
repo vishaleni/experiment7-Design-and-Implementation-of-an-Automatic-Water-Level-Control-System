@@ -113,6 +113,378 @@ The water-level information is displayed on the **Wokwi Serial Monitor** using U
 ---
 
 ## Program
+```
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stm32l0xx_hal.h>
+
+/* Built-in LED representing the water pump */
+#define PUMP_LED_PORT              GPIOB
+#define PUMP_LED_PIN               GPIO_PIN_3
+#define PUMP_LED_CLK_ENABLE()      __HAL_RCC_GPIOB_CLK_ENABLE()
+
+/* Soil-moisture sensor analog input */
+#define SOIL_SENSOR_PORT           GPIOA
+#define SOIL_SENSOR_PIN            GPIO_PIN_0
+#define SOIL_SENSOR_CHANNEL        ADC_CHANNEL_0
+
+/* USART2 virtual COM port pins */
+#define VCP_TX_PIN                 GPIO_PIN_2
+#define VCP_RX_PIN                 GPIO_PIN_15
+
+/*
+ * Higher ADC value = dry soil
+ * Lower ADC value  = wet soil
+ *
+ * Separate thresholds provide hysteresis and prevent
+ * repeated ON/OFF switching near one threshold.
+ */
+#define PUMP_ON_THRESHOLD          2800
+#define PUMP_OFF_THRESHOLD         2200
+
+UART_HandleTypeDef huart2;
+ADC_HandleTypeDef hadc1;
+
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_USART2_UART_Init(void);
+static uint32_t Read_Soil_Moisture(void);
+void Error_Handler(void);
+
+int main(void)
+{
+  uint32_t soilValue;
+  uint32_t moisturePercentage;
+  uint8_t pumpStatus = 0;
+
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_ADC1_Init();
+  MX_USART2_UART_Init();
+
+  printf("\r\n====================================\r\n");
+  printf("STM32 Smart Irrigation System\r\n");
+  printf("====================================\r\n");
+  printf("PA0 : Soil-moisture sensor\r\n");
+  printf("PB3 : Pump indicator LED\r\n\r\n");
+
+  /*
+   * Calibrate the ADC before taking readings.
+   */
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  while (1)
+  {
+    soilValue = Read_Soil_Moisture();
+
+    /*
+     * Convert ADC value into moisture percentage.
+     *
+     * ADC = 0    means approximately 100% wet.
+     * ADC = 4095 means approximately 0% wet.
+     */
+    moisturePercentage =
+        100U - ((soilValue * 100U) / 4095U);
+
+    /*
+     * Turn ON the pump when the soil becomes dry.
+     */
+    if ((soilValue >= PUMP_ON_THRESHOLD) && (pumpStatus == 0))
+    {
+      pumpStatus = 1;
+
+      HAL_GPIO_WritePin(
+          PUMP_LED_PORT,
+          PUMP_LED_PIN,
+          GPIO_PIN_SET);
+
+      printf("Soil is dry: Pump switched ON\r\n");
+    }
+
+    /*
+     * Turn OFF the pump when sufficient moisture is reached.
+     */
+    else if ((soilValue <= PUMP_OFF_THRESHOLD) && (pumpStatus == 1))
+    {
+      pumpStatus = 0;
+
+      HAL_GPIO_WritePin(
+          PUMP_LED_PORT,
+          PUMP_LED_PIN,
+          GPIO_PIN_RESET);
+
+      printf("Soil is wet: Pump switched OFF\r\n");
+    }
+
+    printf("ADC value: %lu | Moisture: %lu%% | Pump: %s\r\n",
+           (unsigned long)soilValue,
+           (unsigned long)moisturePercentage,
+           pumpStatus ? "ON" : "OFF");
+
+    printf("------------------------------------\r\n");
+
+    HAL_Delay(1000);
+  }
+}
+
+/**
+ * Read the soil-moisture sensor through ADC1.
+ */
+static uint32_t Read_Soil_Moisture(void)
+{
+  uint32_t adcValue;
+
+  if (HAL_ADC_Start(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_ADC_PollForConversion(&hadc1, 100) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  adcValue = HAL_ADC_GetValue(&hadc1);
+
+  HAL_ADC_Stop(&hadc1);
+
+  return adcValue;
+}
+
+/**
+ * GPIO initialization.
+ */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  PUMP_LED_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*
+   * Configure PB3 as the pump indicator output.
+   */
+  GPIO_InitStruct.Pin = PUMP_LED_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+  HAL_GPIO_Init(PUMP_LED_PORT, &GPIO_InitStruct);
+
+  /*
+   * Initially keep the pump OFF.
+   */
+  HAL_GPIO_WritePin(
+      PUMP_LED_PORT,
+      PUMP_LED_PIN,
+      GPIO_PIN_RESET);
+
+  /*
+   * Configure PA0 as an analog input.
+   */
+  GPIO_InitStruct.Pin = SOIL_SENSOR_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+
+  HAL_GPIO_Init(SOIL_SENSOR_PORT, &GPIO_InitStruct);
+}
+
+/**
+ * ADC1 initialization.
+ */
+static void MX_ADC1_Init(void)
+{
+  ADC_ChannelConfTypeDef channelConfig = {0};
+
+  __HAL_RCC_ADC1_CLK_ENABLE();
+
+  hadc1.Instance = ADC1;
+  hadc1.Init.OversamplingMode = DISABLE;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.SamplingTime = ADC_SAMPLETIME_39CYCLES_5;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.LowPowerFrequencyMode = DISABLE;
+  hadc1.Init.LowPowerAutoPowerOff = DISABLE;
+
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  channelConfig.Channel = SOIL_SENSOR_CHANNEL;
+  channelConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
+
+  if (HAL_ADC_ConfigChannel(&hadc1, &channelConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+ * System clock configuration.
+ */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+
+  __HAL_PWR_VOLTAGESCALING_CONFIG(
+      PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  RCC_OscInitStruct.OscillatorType =
+      RCC_OSCILLATORTYPE_HSI;
+
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue =
+      RCC_HSICALIBRATION_DEFAULT;
+
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLLMUL_4;
+  RCC_OscInitStruct.PLL.PLLDIV = RCC_PLLDIV_2;
+
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType =
+      RCC_CLOCKTYPE_HCLK |
+      RCC_CLOCKTYPE_SYSCLK |
+      RCC_CLOCKTYPE_PCLK1 |
+      RCC_CLOCKTYPE_PCLK2;
+
+  RCC_ClkInitStruct.SYSCLKSource =
+      RCC_SYSCLKSOURCE_PLLCLK;
+
+  RCC_ClkInitStruct.AHBCLKDivider =
+      RCC_SYSCLK_DIV1;
+
+  RCC_ClkInitStruct.APB1CLKDivider =
+      RCC_HCLK_DIV1;
+
+  RCC_ClkInitStruct.APB2CLKDivider =
+      RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(
+          &RCC_ClkInitStruct,
+          FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  PeriphClkInit.PeriphClockSelection =
+      RCC_PERIPHCLK_USART2;
+
+  PeriphClkInit.Usart2ClockSelection =
+      RCC_USART2CLKSOURCE_PCLK1;
+
+  if (HAL_RCCEx_PeriphCLKConfig(
+          &PeriphClkInit) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+ * USART2 initialization.
+ */
+static void MX_USART2_UART_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_USART2_CLK_ENABLE();
+
+  /*
+   * PA2  -> USART2_TX
+   * PA15 -> USART2_RX
+   */
+  GPIO_InitStruct.Pin = VCP_TX_PIN | VCP_RX_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF4_USART2;
+
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling =
+      UART_ONE_BIT_SAMPLE_DISABLE;
+
+  huart2.AdvancedInit.AdvFeatureInit =
+      UART_ADVFEATURE_NO_INIT;
+
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+ * Error handler.
+ */
+void Error_Handler(void)
+{
+  HAL_GPIO_WritePin(
+      PUMP_LED_PORT,
+      PUMP_LED_PIN,
+      GPIO_PIN_RESET);
+
+  while (1)
+  {
+    /* Remain here when an initialization error occurs. */
+  }
+}
+
+/*
+ * Redirect printf() output to USART2.
+ */
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+
+int _write(int file, uint8_t *ptr, int len)
+{
+  if ((file == STDOUT_FILENO) ||
+      (file == STDERR_FILENO))
+  {
+    HAL_UART_Transmit(
+        &huart2,
+        ptr,
+        len,
+        HAL_MAX_DELAY);
+
+    return len;
+  }
+
+  return -1;
+```
+} 
 
 
 ## Circuit Connections
